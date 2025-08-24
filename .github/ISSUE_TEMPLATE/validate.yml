@@ -1,0 +1,26 @@
+name: "Validate IFC"
+description: "Last opp BIM-instruks (PDF) og IFC for validering."
+labels: ["validate"]
+body:
+  - type: input
+    id: project_name
+    attributes:
+      label: Prosjektnavn
+      description: "Navn på prosjektet som skal valideres."
+      placeholder: "Prosjektnavn"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Beskrivelse
+      description: "Beskriv prosjektet og eventuelle notater."
+      placeholder: ""
+    validations:
+      required: false
+  - type: markdown
+    attributes:
+      value: |
+        **Filopplasting**
+        Dra og slipp PDF- og IFC-filer i kommentarfeltet nedenfor.
+        Den siste PDF-en regnes som BIM-instruks; alle IFC-filer valideres.
