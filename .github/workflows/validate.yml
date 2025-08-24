@@ -1,0 +1,123 @@
+name: BIM Validation
+
+on:
+  issues:
+    types: [opened, edited, labeled]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  security-events: write
+
+jobs:
+  validate:
+    if: >
+      (github.event_name == 'issues' && contains(github.event.issue.labels.*.name, 'validate')) ||
+      (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/run'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install ifcopenshell ifctester pypdf requests
+      - name: Gather attachments
+        id: gather
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const issue = context.payload.issue || context.payload.comment?.issue;
+            const issue_number = issue.number;
+            const { data: issueData } = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue_number,
+            });
+            let urls = [];
+            const regex = /(https?:\/\/[^\s)]+?\.(?:pdf|ifc))/gi;
+            function extract(text) {
+              let m;
+              while ((m = regex.exec(text || "")) !== null) {
+                urls.push(m[1]);
+              }
+            }
+            extract(issueData.body);
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue_number,
+              per_page: 100,
+            });
+            for (const c of comments) {
+              extract(c.body);
+            }
+            core.setOutput('urls', JSON.stringify(urls));
+            core.setOutput('issue_number', issue_number.toString());
+      - name: Download attachments
+        run: |
+          mkdir -p downloads
+          python3 - <<'PY'
+import os, json, urllib.request
+urls = json.loads(os.environ['URLS'])
+for url in urls:
+    fname = url.split('/')[-1].split('?')[0]
+    print('Downloading', url, 'to', fname)
+    try:
+        urllib.request.urlretrieve(url, os.path.join('downloads', fname))
+    except Exception as e:
+        print('Failed to download', url, e)
+PY
+        env:
+          URLS: ${{ steps.gather.outputs.urls }}
+      - name: Extract requirements
+        run: |
+          python3 scripts/extract_requirements.py --input downloads --output requirements.json
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      - name: Validate IFC
+        run: |
+          python3 scripts/validate_ifc.py --input downloads --requirements requirements.json --out-json report.json --out-html report.html
+      - name: Generate SARIF
+        run: |
+          python3 scripts/to_sarif.py --input report.json --output report.sarif
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: validation-report
+          path: |
+            report.json
+            report.html
+            report.sarif
+      - name: Upload SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: report.sarif
+      - name: Post summary comment
+        uses: actions/github-script@v6
+        env:
+          ISSUE_NUMBER: ${{ steps.gather.outputs.issue_number }}
+        with:
+          script: |
+            const fs = require('fs');
+            const issue_number = parseInt(process.env.ISSUE_NUMBER);
+            let results = [];
+            try {
+              const data = fs.readFileSync('report.json', 'utf8');
+              results = JSON.parse(data);
+            } catch (err) {
+              results = [];
+            }
+            let passed = results.filter(r => r.status === 'PASS').length;
+            let failed = results.filter(r => r.status === 'FAIL').length;
+            let body = `Valideringsrapport generert. **${passed}** krav oppfylt, **${failed}** avvik. Se artefakt for full rapport.`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue_number,
+              body: body,
+            });
